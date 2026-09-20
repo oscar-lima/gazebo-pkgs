@@ -30,6 +30,7 @@ GazeboGraspGripper::GazeboGraspGripper(const GazeboGraspGripper &o):
   linkNames(o.linkNames),
   collisionElems(o.collisionElems),
   fixedJoint(o.fixedJoint),
+  forceJoint(o.forceJoint),
   palmLink(o.palmLink),
   disableCollisionsOnAttach(o.disableCollisionsOnAttach),
   attached(o.attached),
@@ -47,6 +48,7 @@ bool GazeboGraspGripper::Init(physics::ModelPtr &_model,
                               const std::string &_gripperName,
                               const std::string &palmLinkName,
                               const std::vector<std::string> &fingerLinkNames,
+                              const physics::JointPtr &forceJoint,
                               bool _disableCollisionsOnAttach,
                               std::map<std::string, physics::CollisionPtr> &_collisionElems)
 {
@@ -54,6 +56,13 @@ bool GazeboGraspGripper::Init(physics::ModelPtr &_model,
   this->attached = false;
   this->disableCollisionsOnAttach = _disableCollisionsOnAttach;
   this->model = _model;
+  this->forceJoint = forceJoint;
+  if (!this->forceJoint)
+  {
+    gzerr << "GazeboGraspGripper: Force joint not found. The gazebo grasp " <<
+             "plugin will not work." << std::endl;
+    return false;
+  }
   physics::PhysicsEnginePtr physics =
     gazebo::GetPhysics(this->model->GetWorld());
   this->fixedJoint = physics->CreateJoint("revolute");
@@ -134,6 +143,12 @@ bool GazeboGraspGripper::isObjectAttached() const
 const std::string &GazeboGraspGripper::attachedObject() const
 {
   return attachedObjName;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+double GazeboGraspGripper::gripEffort() const
+{
+  return this->forceJoint->GetForce(0);
 }
 
 

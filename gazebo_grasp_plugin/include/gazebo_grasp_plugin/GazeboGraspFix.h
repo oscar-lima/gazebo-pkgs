@@ -28,12 +28,14 @@ namespace gazebo
  *              <gripper_link> finger_index_link_1 </gripper_link>
  *              <gripper_link> finger_index_link_2 </gripper_link>
  *              <gripper_link> ... </gripper_link>
+ *              <gripper_joint> gripper_finger_joint </gripper_joint>
  *           </arm>
- *           <forces_angle_tolerance>100</forces_angle_tolerance>
  *           <update_rate>4</update_rate>
  *           <grip_count_threshold>4</grip_count_threshold>
  *           <max_grip_count>8</max_grip_count>
- *           <release_tolerance>0.005</release_tolerance>
+ *           <grip_effort_threshold>1.0</grip_effort_threshold>
+ *           <attach_delay>1.0</attach_delay>
+ *           <detach_delay>0.1</detach_delay>
  *           <disable_collisions_on_attach>false</disable_collisions_on_attach>
  *           <contact_topic>__default_topic__</contact_topic>
  *       </plugin>
@@ -48,13 +50,19 @@ namespace gazebo
  *        - ``<gripper_link>`` tags have to include -all- link names of the gripper/hand which are used to
  *              actively grasp objects (these are the links which determine whether a "grasp" exists according to
  *              above described criterion).
+ *        - ``<gripper_joint>`` is the master finger joint whose applied effort indicates squeezing.
+ *              If omitted, the plugin finds the unique joint ending in ``gripper_finger_joint``.
  *    - ``<update_rate>`` is the rate at which all contact points are checked against the "gripping criterion".
  *          Note that in-between such updates, existing contact points may be collected at
  *          a higher rate (the Gazebo world update rate). The ``update_rate`` is only the rate at
  *          which they are processed, which takes a bit of computation time, and therefore
  *          should be lower than the gazebo world update rate.
- *    - ``<forces_angle_tolerance>`` is the tolerance angle (in degrees) between two force vectors to be considered
- *           "opposing forces". If the angle is smaller than this, they are not opposing.
+ *    - ``<grip_effort_threshold>`` is the minimum positive master finger joint effort in Nm required
+ *           to attach and hold an object. MobiPick closes with positive effort and opens near zero.
+ *    - ``<attach_delay>`` is the number of seconds for which the force-based grasp must be held
+ *           continuously before the object is attached. It uses simulation time and defaults to 1 second.
+ *    - ``<detach_delay>`` is the number of seconds for which the master joint effort must remain below
+ *           the threshold before release. It filters one-cycle effort dropouts and defaults to 0.1 seconds.
  *    - ``<grip_count_threshold>`` is number of times in the update loop (running at update_rate) that an object has
  *            to be detected as "gripped" in order to attach the object.
  *            Adjust this with the update rate.
@@ -68,14 +76,6 @@ namespace gazebo
  *            like a "buffer" which, when it is full, maintains the state, and when it is empty,
  *            again, the object is released.
  *            This should be at least double of ``grip_count_threshold``.
- *    - ``<release_tolerance>`` is the distance which the gripper links are allowed to move away from the object
- *            during- a grasp without the object being detached, even if there are currently no
- *            actual contacts on the object. This condition can happen if the fingers "wobble"
- *            or move ever so slightly away from the object, and therefore the "gripping criterion"
- *            fails in a few subsequent update iterations. This setting is to make the behaviour more
- *            stable.
- *            Setting this number too high will also lead to the object not being detached even
- *            if the grippers have opened up to release it, so use this with care.
  *    - ``<disable_collisions_on_attach>`` can be used for the following:
  *            When an object is attached, collisions with it may be disabled, in case the
  *            robot still keeps wobbling.
@@ -112,26 +112,17 @@ class GazeboGraspFix : public ModelPlugin
     virtual void Init();
     virtual void Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf);
     /**
-     * Collects for each object all forces which are currently applied on it.
-     * Then, for each object, checks whether of all the forces applied,
-     * there are opposing forces.
-     * This is done by calling CheckGrip() with the list of all forces applied.
-     * If CheckGrip() returns true, the number of "grip counts"
+     * Collects the current gripper contacts for each object. A MobiPick grasp
+     * requires contact from both the left and right finger sides plus sufficient
+     * positive effort at the master finger joint. When that is true, the number of "grip counts"
      * is increased for the holding arm (but grip counts will never exceed \e max_grip_count).
      * If the number of grip counts for this object exceeds \e grip_count_threshold,
      * the object is attached by calling GazeboGraspGripper::HandleAttach(object-name),
-     * setting \e attached and \e attachedObjName, and \e GazeboGraspGripper::attachGripContacts
-     * is updated with the contact points currently existing for this object (current entry in \e contacts).
+     * setting \e attached and \e attachedObjName.
      *
-     * Then, goes through all entries in \e gripCount, and unless it's an object
-     * we just detected as "gripped", the counter is decreased.
-     * If the counter is is smaller than \e grip_count_threshold, the object should
-     * potentially be released, but this criterion happens too easily
-     * (the fingers in gazebo may have started wobbling as the arm moves around, and although they are still
-     * close to the object, the grip is not detected any more).
-     * So to be sure, and additional criterion has to be satisfied before the object is released:
-     * check that the collision point (the place on the link where the contact originally
-     * was detected) has not moved too far from where it originally was, relative to the object.
+     * Attached objects are released when master-joint effort remains below
+     * \e grip_effort_threshold for \e detach_delay. This deliberately does not use
+     * distance to the original contact point, so opening releases compliant objects.
      */
     void OnUpdate();
 
@@ -151,9 +142,6 @@ class GazeboGraspFix : public ModelPlugin
      * the average force application over time between link and object.
      */
     void OnContact(const ConstContactsPtr &ptr);
-
-//    bool CheckGrip(const std::vector<GzVector3> &forces, float minAngleDiff,
-//                   float lengthRatio);
 
     bool IsGripperLink(const std::string &linkName, std::string &gripperName) const;
 
@@ -193,9 +181,23 @@ class GazeboGraspFix : public ModelPlugin
     transport::PublisherPtr eventsPub;   // publisher of grasping events
     transport::SubscriberPtr contactSub; // subscriber to contact updates
 
-    // tolerance (in degrees) between force vectors to
-    // be considered "opposing"
-    float forcesAngleTolerance;
+    // minimum MobiPick master finger joint effort [Nm] required to attach/hold
+    double gripEffortThreshold;
+
+    // continuous force-qualified grasp duration [s] required before attachment
+    double attachDelay;
+
+    // continuous low-effort duration [s] required before detachment
+    double detachDelay;
+
+    // simulation time at which each uninterrupted force-qualified grasp started
+    std::map<std::string, common::Time> gripStartTimes;
+
+    // gripper associated with a pending object; retained through contact-message gaps
+    std::map<std::string, std::string> gripCandidates;
+
+    // simulation time at which low effort was first observed for an attached object
+    std::map<std::string, common::Time> lowEffortStartTimes;
 
     // when an object is attached, collisions with it may be disabled, in case the
     // robot still keeps wobbling.
@@ -218,16 +220,6 @@ class GazeboGraspFix : public ModelPlugin
     std::map<std::string, std::map<std::string, CollidingPoint> > contacts;
     boost::mutex mutexContacts; //mutex protects contacts
 
-    // when an object was first attached, it had these colliding points.
-    // First key is object name, second is the link colliding, as in \e contacts.
-    // Only the links of *one* gripper are stored here. This indirectly imposes the
-    // limitation that no two grippers can grasp the object (while it would be
-    // possible, the release condition is tied to only one link, so the object may
-    // not be released properly).
-    std::map<std::string, std::map<std::string, CollidingPoint> >
-    attachGripContacts;
-
-
     // Records how many subsequent update calls the grip on that object has been recorded
     // as "holding". Every loop, if a grip is not recorded, this number decreases.
     // When it reaches \e grip_count_threshold, it will be attached.
@@ -240,11 +232,6 @@ class GazeboGraspFix : public ModelPlugin
     // number of recorded "grips" in the past (in gripCount) which, when it is exceeded, counts
     // as the object grasped, and when it is lower, as released.
     int gripCountThreshold;
-
-    // once an object is gripped, the relative position of the collision link surface to the
-    // object is remembered. As soon as this distance changes more than release_tolerance,
-    // the object is released.
-    float releaseTolerance;
 
     //nano seconds between two updates
     common::Time updateRate;

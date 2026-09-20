@@ -26,6 +26,8 @@ class GazeboGraspGripper
 
     /**
      *
+     * \param forceJoint master finger joint whose applied effort represents the
+     *      MobiPick gripper's closing force.
      * \param disableCollisionsOnAttach when an object is attached, collisions with it will be disabled. This is useful
      *      if the robot then still keeps wobbling.
      */
@@ -33,6 +35,7 @@ class GazeboGraspGripper
               const std::string &_gripperName,
               const std::string &palmLinkName,
               const std::vector<std::string> &fingerLinkNames,
+              const physics::JointPtr &forceJoint,
               bool _disableCollisionsOnAttach,
               std::map<std::string, physics::CollisionPtr> &_collisions);
 
@@ -51,6 +54,8 @@ class GazeboGraspGripper
     bool isObjectAttached() const;
 
     const std::string &attachedObject() const;
+
+    double gripEffort() const;
 
     /**
      * \param gripContacts contact forces on the object sorted by the link name colliding.
@@ -72,6 +77,9 @@ class GazeboGraspGripper
     std::map<std::string, physics::CollisionPtr> collisionElems;
 
     physics::JointPtr fixedJoint;
+
+    // MobiPick master finger joint used as the grasp/release effort signal.
+    physics::JointPtr forceJoint;
 
     physics::LinkPtr palmLink;
 
