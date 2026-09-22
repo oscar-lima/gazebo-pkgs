@@ -20,6 +20,15 @@ using gazebo::GzVector3;
 #define DEFAULT_MAX_GRIP_COUNT 10
 #define DEFAULT_DISABLE_COLLISIONS_ON_ATTACH false
 
+// Plugin elements have no SDF description, so GetElement() on a missing child
+// makes sdformat print "Missing element description". Check for it first.
+static sdf::ElementPtr GetOptionalElement(const sdf::ElementPtr &_sdf,
+                                          const std::string &_name)
+{
+  if (!_sdf->HasElement(_name)) return sdf::ElementPtr();
+  return _sdf->GetElement(_name);
+}
+
 // Register this plugin with the simulator
 GZ_REGISTER_MODEL_PLUGIN(GazeboGraspFix)
 
@@ -84,7 +93,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   this->world = model->GetWorld();
 
   sdf::ElementPtr disableCollisionsOnAttachElem =
-    _sdf->GetElement("disable_collisions_on_attach");
+    GetOptionalElement(_sdf, "disable_collisions_on_attach");
   if (!disableCollisionsOnAttachElem)
   {
     gzmsg << "GazeboGraspFix: Using default " <<
@@ -110,7 +119,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   }
 
   sdf::ElementPtr gripEffortThresholdElem =
-    _sdf->GetElement("grip_effort_threshold");
+    GetOptionalElement(_sdf, "grip_effort_threshold");
   if (!gripEffortThresholdElem)
   {
     this->gripEffortThreshold = DEFAULT_GRIP_EFFORT_THRESHOLD;
@@ -131,7 +140,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
     return;
   }
 
-  sdf::ElementPtr attachDelayElem = _sdf->GetElement("attach_delay");
+  sdf::ElementPtr attachDelayElem = GetOptionalElement(_sdf, "attach_delay");
   if (!attachDelayElem)
   {
     this->attachDelay = DEFAULT_ATTACH_DELAY;
@@ -152,7 +161,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
     return;
   }
 
-  sdf::ElementPtr detachDelayElem = _sdf->GetElement("detach_delay");
+  sdf::ElementPtr detachDelayElem = GetOptionalElement(_sdf, "detach_delay");
   if (!detachDelayElem)
   {
     this->detachDelay = DEFAULT_DETACH_DELAY;
@@ -173,7 +182,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
     return;
   }
 
-  sdf::ElementPtr updateRateElem = _sdf->GetElement("update_rate");
+  sdf::ElementPtr updateRateElem = GetOptionalElement(_sdf, "update_rate");
   double _updateSecs;
   if (!updateRateElem)
   {
@@ -190,7 +199,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   }
   this->updateRate = common::Time(0, common::Time::SecToNano(_updateSecs));
 
-  sdf::ElementPtr maxGripCountElem = _sdf->GetElement("max_grip_count");
+  sdf::ElementPtr maxGripCountElem = GetOptionalElement(_sdf, "max_grip_count");
   if (!maxGripCountElem)
   {
     gzmsg << "GazeboGraspFix: Using  " << DEFAULT_MAX_GRIP_COUNT <<
@@ -205,7 +214,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   }
 
   sdf::ElementPtr gripCountThresholdElem =
-    _sdf->GetElement("grip_count_threshold");
+    GetOptionalElement(_sdf, "grip_count_threshold");
   if (!gripCountThresholdElem)
   {
     this->gripCountThreshold = floor(this->maxGripCount / 2.0);
@@ -229,7 +238,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   // will contain all names of collision entities involved from all arms
   std::vector<std::string> collisionNames;
 
-  sdf::ElementPtr armElem = _sdf->GetElement("arm");
+  sdf::ElementPtr armElem = GetOptionalElement(_sdf, "arm");
   if (!armElem)
   {
     gzerr << "GazeboGraspFix: Cannot load the GazeboGraspFix without any <arm> declarations"
@@ -239,9 +248,9 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   // add all arms:
   for (; armElem != NULL; armElem = armElem->GetNextElement("arm"))
   {
-    sdf::ElementPtr armNameElem = armElem->GetElement("arm_name");
-    sdf::ElementPtr handLinkElem = armElem->GetElement("palm_link");
-    sdf::ElementPtr fingerLinkElem = armElem->GetElement("gripper_link");
+    sdf::ElementPtr armNameElem = GetOptionalElement(armElem, "arm_name");
+    sdf::ElementPtr handLinkElem = GetOptionalElement(armElem, "palm_link");
+    sdf::ElementPtr fingerLinkElem = GetOptionalElement(armElem, "gripper_link");
 
     if (!handLinkElem || !fingerLinkElem || !armNameElem)
     {
@@ -255,7 +264,7 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
     std::string palmName = handLinkElem->Get<std::string>();
 
     physics::JointPtr forceJoint;
-    sdf::ElementPtr forceJointElem = armElem->GetElement("gripper_joint");
+    sdf::ElementPtr forceJointElem = GetOptionalElement(armElem, "gripper_joint");
     if (forceJointElem)
     {
       const std::string forceJointName = forceJointElem->Get<std::string>();
