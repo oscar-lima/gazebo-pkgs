@@ -229,6 +229,12 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
           this->gripCountThreshold << std::endl;
   }
 
+  this->effortWindow = 0.3;
+  sdf::ElementPtr effortWindowElem = GetOptionalElement(_sdf, "effort_window");
+  if (effortWindowElem)
+    this->effortWindow = effortWindowElem->Get<double>();
+  gzmsg << "GazeboGraspFix: Using effort_window " << this->effortWindow << " s." << std::endl;
+
   if (_sdf->HasElement("release_tolerance"))
   {
     gzwarn << "GazeboGraspFix: <release_tolerance> is obsolete and ignored; " <<
@@ -548,8 +554,39 @@ class GazeboGraspFix::CollidingPoint
 };
 
 ////////////////////////////////////////////////////////////////////////////////
+double GazeboGraspFix::GripEffort(const std::string &gripperName) const
+{
+  std::map<std::string, std::deque<std::pair<double, double> > >::const_iterator it =
+    this->effortSamples.find(gripperName);
+  if (it == this->effortSamples.end() || it->second.empty())
+    return 0.0;
+  double best = it->second.front().second;
+  for (std::deque<std::pair<double, double> >::const_iterator sIt = it->second.begin();
+       sIt != it->second.end(); ++sIt)
+    best = std::max(best, sIt->second);
+  return best;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void GazeboGraspFix::OnUpdate()
 {
+#if GAZEBO_MAJOR_VERSION >= 8
+  const double sampleTime = this->world->SimTime().Double();
+#else
+  const double sampleTime = this->world->GetSimTime().Double();
+#endif
+  // Sample the finger effort in every physics step: single readings drop to 0 while squeezing (#126).
+  for (std::map<std::string, GazeboGraspGripper>::iterator gIt = grippers.begin(); gIt != grippers.end(); ++gIt)
+  {
+    std::deque<std::pair<double, double> > &samples = this->effortSamples[gIt->first];
+    const double effort = gIt->second.gripEffort();
+    if (effort != 0.0 || samples.empty())
+      samples.push_back(std::make_pair(sampleTime, effort));
+    while (!samples.empty() && (samples.front().first < sampleTime - this->effortWindow ||
+                                samples.front().first > sampleTime))  // sim time reset
+      samples.pop_front();
+  }
+
   if ((common::Time::GetWallTime() - this->prevUpdateTime) < this->updateRate)
     return;
 
@@ -577,7 +614,17 @@ void GazeboGraspFix::OnUpdate()
   for (objIt = contPoints.begin(); objIt != contPoints.end(); ++objIt)
   {
     std::string objName = objIt->first;
-    //gzmsg<<"Examining object collisions with "<<objName<<std::endl;
+    // Objects with several collisions (e.g. the banana, 7 boxes, #126) are gripped when the two fingers touch
+    // different collisions of the same link: accumulate per link, under the link's first collision name
+    // (lexicographic, so the key is stable between updates; attaching it fixes the whole link).
+    if (!objIt->second.empty() && objIt->second.begin()->second.collObj &&
+        objIt->second.begin()->second.collObj->GetLink())
+    {
+      const physics::Collision_V linkCollisions =
+        objIt->second.begin()->second.collObj->GetLink()->GetCollisions();
+      for (physics::Collision_V::const_iterator cIt = linkCollisions.begin(); cIt != linkCollisions.end(); ++cIt)
+        if ((*cIt)->GetScopedName() < objName) objName = (*cIt)->GetScopedName();
+    }
 
     // create new entry in accumulated results map and get reference to fill in:
     ObjectContactInfo &objContInfo = objectContactInfo[objName];
@@ -648,7 +695,7 @@ void GazeboGraspFix::OnUpdate()
       continue;
     }
     GazeboGraspGripper &graspingGripper = gIt->second;
-    if (graspingGripper.gripEffort() < this->gripEffortThreshold)
+    if (GripEffort(graspingGripperName) < this->gripEffortThreshold)
       continue;
 
     // add to "gripped objects"
@@ -744,7 +791,7 @@ void GazeboGraspFix::OnUpdate()
       std::map<std::string, GazeboGraspGripper>::const_iterator candidateGripperIt =
         grippers.find(candidateIt->second);
       squeezingCandidate = (candidateGripperIt != grippers.end()) &&
-        (candidateGripperIt->second.gripEffort() >= this->gripEffortThreshold);
+        (GripEffort(candidateIt->second) >= this->gripEffortThreshold);
     }
     if (squeezingCandidate)
       continue;
@@ -774,7 +821,7 @@ void GazeboGraspFix::OnUpdate()
       continue;
     }
     GazeboGraspGripper &graspingGripper = gripperIt->second;
-    const double gripEffort = graspingGripper.gripEffort();
+    const double gripEffort = GripEffort(graspingGripperName);
     if (gripEffort >= this->gripEffortThreshold)
     {
       this->lowEffortStartTimes.erase(objName);

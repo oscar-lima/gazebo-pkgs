@@ -198,6 +198,11 @@ class GazeboGraspFix : public ModelPlugin
 
     // simulation time at which low effort was first observed for an attached object
     std::map<std::string, common::Time> lowEffortStartTimes;
+    // Gazebo reads the finger joint effort (Joint::GetForce) back as exactly 0 in many physics steps while the
+    // controller keeps squeezing (#126), so the grip effort is the highest sample of the last effortWindow seconds.
+    double effortWindow;
+    std::map<std::string, std::deque<std::pair<double, double> > > effortSamples;
+    double GripEffort(const std::string &gripperName) const;
 
     // when an object is attached, collisions with it may be disabled, in case the
     // robot still keeps wobbling.
