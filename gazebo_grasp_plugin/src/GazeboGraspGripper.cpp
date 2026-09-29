@@ -151,6 +151,16 @@ double GazeboGraspGripper::gripEffort() const
   return this->forceJoint->GetForce(0);
 }
 
+///////////////////////////////////////////////////////////////////////////////
+double GazeboGraspGripper::fingerPosition() const
+{
+#if GAZEBO_MAJOR_VERSION >= 8
+  return this->forceJoint->Position(0);
+#else
+  return this->forceJoint->GetAngle(0).Radian();
+#endif
+}
+
 
 
 ///////////////////////////////////////////////////////////////////////////////

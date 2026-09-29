@@ -202,6 +202,13 @@ class GazeboGraspFix : public ModelPlugin
     // controller keeps squeezing (#126), so the grip effort is the highest sample of the last effortWindow seconds.
     double effortWindow;
     std::map<std::string, std::deque<std::pair<double, double> > > effortSamples;
+
+    // Release as soon as the master finger joint has opened by detachOpenAngle [rad] from where it stood when the
+    // object was attached, towards openPosition (0 disables it). The effort-based release alone waits until the
+    // windowed effort has decayed, ~0.37 s after the open command, while the fingers already stand wide (#209).
+    double detachOpenAngle;
+    double openPosition;
+    std::map<std::string, double> attachFingerPositions;
     double GripEffort(const std::string &gripperName) const;
 
     // when an object is attached, collisions with it may be disabled, in case the

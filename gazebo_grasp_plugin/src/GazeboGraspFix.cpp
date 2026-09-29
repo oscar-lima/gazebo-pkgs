@@ -1,4 +1,5 @@
 #include <boost/bind.hpp>
+#include <cmath>
 #include <gazebo/gazebo.hh>
 #include <gazebo/physics/physics.hh>
 #include <gazebo/physics/ContactManager.hh>
@@ -234,6 +235,18 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   if (effortWindowElem)
     this->effortWindow = effortWindowElem->Get<double>();
   gzmsg << "GazeboGraspFix: Using effort_window " << this->effortWindow << " s." << std::endl;
+
+  this->detachOpenAngle = 0.0;
+  sdf::ElementPtr detachOpenAngleElem = GetOptionalElement(_sdf, "detach_open_angle");
+  if (detachOpenAngleElem)
+    this->detachOpenAngle = detachOpenAngleElem->Get<double>();
+  this->openPosition = 0.0;
+  sdf::ElementPtr openPositionElem = GetOptionalElement(_sdf, "open_position");
+  if (openPositionElem)
+    this->openPosition = openPositionElem->Get<double>();
+  if (this->detachOpenAngle > 0.0)
+    gzmsg << "GazeboGraspFix: Detaching when the finger joint opens " << this->detachOpenAngle <<
+          " rad towards " << this->openPosition << " (or on low effort)." << std::endl;
 
   if (_sdf->HasElement("release_tolerance"))
   {
@@ -757,6 +770,7 @@ void GazeboGraspFix::OnUpdate()
       this->OnAttach(objName, graspingGripperName);
       this->gripCandidates.erase(objName);
       this->gripStartTimes.erase(objName);
+      this->attachFingerPositions[objName] = graspingGripper.fingerPosition();
     }
   }  // for all objects
 
@@ -821,6 +835,28 @@ void GazeboGraspFix::OnUpdate()
       continue;
     }
     GazeboGraspGripper &graspingGripper = gripperIt->second;
+    std::map<std::string, double>::const_iterator attachPosIt = this->attachFingerPositions.find(objName);
+    if (this->detachOpenAngle > 0.0 && attachPosIt != this->attachFingerPositions.end())
+    {
+      // opened: the finger joint came closer to the open position than when it closed on the object (#209)
+      const double position = graspingGripper.fingerPosition();
+      const double opened = std::fabs(attachPosIt->second - this->openPosition) -
+                            std::fabs(position - this->openPosition);
+      if (opened >= this->detachOpenAngle)
+      {
+        gzmsg << "GazeboGraspFix: Detaching " << objName << " from gripper " << graspingGripperName <<
+              " because the finger joint opened " << opened << " rad (" << attachPosIt->second << " -> " <<
+              position << ")." << std::endl;
+        graspingGripper.HandleDetach(objName);
+        this->OnDetach(objName, graspingGripperName);
+        this->gripCounts[objName] = 0;
+        this->gripStartTimes.erase(objName);
+        this->gripCandidates.erase(objName);
+        this->lowEffortStartTimes.erase(objName);
+        this->attachFingerPositions.erase(objName);
+        continue;
+      }
+    }
     const double gripEffort = GripEffort(graspingGripperName);
     if (gripEffort >= this->gripEffortThreshold)
     {
@@ -847,6 +883,7 @@ void GazeboGraspFix::OnUpdate()
     this->gripStartTimes.erase(objName);
     this->gripCandidates.erase(objName);
     this->lowEffortStartTimes.erase(objName);
+    this->attachFingerPositions.erase(objName);
   }
 
   this->prevUpdateTime = common::Time::GetWallTime();

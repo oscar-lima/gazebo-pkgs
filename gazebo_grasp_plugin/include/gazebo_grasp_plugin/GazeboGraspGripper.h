@@ -58,6 +58,11 @@ class GazeboGraspGripper
     double gripEffort() const;
 
     /**
+     * Position of the master finger joint (the joint whose effort is the grip signal).
+     */
+    double fingerPosition() const;
+
+    /**
      * \param gripContacts contact forces on the object sorted by the link name colliding.
      */
     bool HandleAttach(const std::string &objName);
