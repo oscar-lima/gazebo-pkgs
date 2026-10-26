@@ -1,5 +1,8 @@
 #include <boost/bind.hpp>
 #include <cmath>
+#include <limits>
+#include <sstream>
+#include <set>
 #include <gazebo/gazebo.hh>
 #include <gazebo/physics/physics.hh>
 #include <gazebo/physics/ContactManager.hh>
@@ -20,6 +23,7 @@ using gazebo::GzVector3;
 #define DEFAULT_UPDATE_RATE 5
 #define DEFAULT_MAX_GRIP_COUNT 10
 #define DEFAULT_DISABLE_COLLISIONS_ON_ATTACH false
+#define DEFAULT_NO_GLUE_RATIO 0.8
 
 // Plugin elements have no SDF description, so GetElement() on a missing child
 // makes sdformat print "Missing element description". Check for it first.
@@ -248,6 +252,13 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
     gzmsg << "GazeboGraspFix: Detaching when the finger joint opens " << this->detachOpenAngle <<
           " rad towards " << this->openPosition << " (or on low effort)." << std::endl;
 
+  this->noGlueRatio = DEFAULT_NO_GLUE_RATIO;
+  sdf::ElementPtr noGlueRatioElem = GetOptionalElement(_sdf, "no_glue_ratio");
+  if (noGlueRatioElem)
+    this->noGlueRatio = noGlueRatioElem->Get<double>();
+  gzmsg << "GazeboGraspFix: Using no_glue_ratio " << this->noGlueRatio <<
+        " (no attachment when the finger gap is below this fraction of the object's width)." << std::endl;
+
   if (_sdf->HasElement("release_tolerance"))
   {
     gzwarn << "GazeboGraspFix: <release_tolerance> is obsolete and ignored; " <<
@@ -420,7 +431,9 @@ class GazeboGraspFix::ObjectContactInfo
     ObjectContactInfo():
       maxGripperContactCnt(0),
       leftFingerContact(false),
-      rightFingerContact(false)
+      rightFingerContact(false),
+      leftContactCnt(0),
+      rightContactCnt(0)
     {}
 
     // all grippers involved in the process, along with
@@ -439,6 +452,15 @@ class GazeboGraspFix::ObjectContactInfo
     // reliable than comparing noisy Gazebo contact-wrench directions.
     bool leftFingerContact;
     bool rightFingerContact;
+
+    // sums of the world positions of the left and right finger contacts and their counts, for the finger gap
+    GzVector3 leftContactSum, rightContactSum;
+    int leftContactCnt, rightContactCnt;
+    // sums of the outward contact normals on the left and right side: their difference is the closing axis
+    GzVector3 leftNormalSum, rightNormalSum;
+
+    // the object's link, whose collision shapes give its width
+    physics::LinkPtr objLink;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -539,6 +561,7 @@ class GazeboGraspFix::CollidingPoint
       force(o.force),
       pos(o.pos),
       objPos(o.objPos),
+      normal(o.normal),
       sum(o.sum) {}
 
     // Name of the gripper/arm involved in contact point
@@ -559,6 +582,9 @@ class GazeboGraspFix::CollidingPoint
     // position (relative to reference frame of *gripper* collision surface)
     // where the object center is located during collision.
     GzVector3 objPos;
+
+    // sum of the contact normals in the world frame, each turned to point out of the object
+    GzVector3 normal;
 
     // sum of force and pose (they are actually summed
     // up from several contact points).
@@ -648,10 +674,34 @@ void GazeboGraspFix::OnUpdate()
     {
       std::string linkName = lIt->first;
       CollidingPoint &collP = lIt->second;
-      if (linkName.find("gripper_left_") != std::string::npos)
+      const bool left = linkName.find("gripper_left_") != std::string::npos;
+      const bool right = linkName.find("gripper_right_") != std::string::npos;
+      if (left)
         objContInfo.leftFingerContact = true;
-      if (linkName.find("gripper_right_") != std::string::npos)
+      if (right)
         objContInfo.rightFingerContact = true;
+      if (collP.collObj && collP.collObj->GetLink())
+        objContInfo.objLink = collP.collObj->GetLink();
+#if GAZEBO_MAJOR_VERSION >= 8
+      // collP.pos sums contact positions in the finger link's frame: back to the world with its current pose
+      if ((left || right) && collP.sum > 0 && collP.collLink && collP.collLink->GetLink())
+      {
+        const GzVector3 contactWorld =
+          collP.collLink->GetLink()->WorldPose().CoordPositionAdd(collP.pos / collP.sum);
+        if (left)
+        {
+          objContInfo.leftContactSum += contactWorld;
+          objContInfo.leftNormalSum += collP.normal;
+          ++objContInfo.leftContactCnt;
+        }
+        else
+        {
+          objContInfo.rightContactSum += contactWorld;
+          objContInfo.rightNormalSum += collP.normal;
+          ++objContInfo.rightContactCnt;
+        }
+      }
+#endif
       // insert the gripper (if it doesn't exist yet) and increase contact counter
       int &gContactCnt = objContInfo.grippersInvolved[collP.gripperName];
       gContactCnt++;
@@ -757,8 +807,26 @@ void GazeboGraspFix::OnUpdate()
       continue;
     }
 
+    // An edge or rim pinch (fingers closed well below the object's width) would likely fail on a real gripper:
+    // leave it to contact physics instead of gluing it.
+    double gap = 0.0, width = 0.0;
+    const bool gapKnown = GraspGapAndWidth(objContInfo, gap, width);
+    if (this->noGlueRatio > 0.0 && gapKnown && gap < this->noGlueRatio * width)
+    {
+      if (this->glueRefused.insert(objName).second)
+        gzmsg << "GazeboGraspFix: Not attaching " << objName << " to gripper " << graspingGripperName <<
+              ": the fingers closed to a gap of " << gap * 1000.0 << " mm, ratio " << gap / width <<
+              " of its width " << width * 1000.0 << " mm along the closing axis, below no_glue_ratio " <<
+              this->noGlueRatio << " (an edge or rim pinch, left to contact physics)." << std::endl;
+      continue;
+    }
+
+    std::ostringstream gapInfo;
+    if (gapKnown)
+      gapInfo << " (finger gap " << gap * 1000.0 << " mm, ratio " << gap / width << " of its width " <<
+              width * 1000.0 << " mm along the closing axis)";
     gzmsg << "GazeboGraspFix: Attaching " << objName << " to gripper " <<
-          graspingGripperName << "." << std::endl;
+          graspingGripperName << gapInfo.str() << "." << std::endl;
 
     if (!graspingGripper.HandleAttach(objName))
     {
@@ -770,6 +838,7 @@ void GazeboGraspFix::OnUpdate()
       this->OnAttach(objName, graspingGripperName);
       this->gripCandidates.erase(objName);
       this->gripStartTimes.erase(objName);
+      this->glueRefused.erase(objName);
       this->attachFingerPositions[objName] = graspingGripper.fingerPosition();
     }
   }  // for all objects
@@ -812,6 +881,7 @@ void GazeboGraspFix::OnUpdate()
 
     this->gripStartTimes.erase(objName);
     this->gripCandidates.erase(objName);
+    this->glueRefused.erase(objName);
 
     // gzmsg<<"NOT-GRIPPING "<<objName<<", grip count "<<gripCntIt->second<<" (threshold "<<this->gripCountThreshold<<")"<<std::endl;
 
@@ -887,6 +957,70 @@ void GazeboGraspFix::OnUpdate()
   }
 
   this->prevUpdateTime = common::Time::GetWallTime();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool GazeboGraspFix::GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width) const
+{
+#if GAZEBO_MAJOR_VERSION >= 8
+  if (objContInfo.leftContactCnt == 0 || objContInfo.rightContactCnt == 0 || !objContInfo.objLink)
+    return false;
+  const GzVector3 closing = objContInfo.leftContactSum / objContInfo.leftContactCnt -
+                            objContInfo.rightContactSum / objContInfo.rightContactCnt;
+  // The closing axis from the outward contact normals (left minus right): the line between the mean contact
+  // points tilts with where the contacts sit on the pads, and on a long object a few degrees of tilt add
+  // several mm of width.
+  GzVector3 axis = objContInfo.leftNormalSum - objContInfo.rightNormalSum;
+  if (axis.Length() < 1e-6)
+    axis = closing;
+  if (axis.Length() < 1e-6)
+    return false;
+  axis.Normalize();
+  gap = std::fabs(closing.Dot(axis));
+  if (gap < 1e-6)
+    return false;
+
+  // Extent of the link's collision shapes along the axis: the exact support of boxes, cylinders and spheres,
+  // the world-aligned bounding box for any other shape (meshes), which may overestimate a rotated one.
+  double lo = std::numeric_limits<double>::max(), hi = -std::numeric_limits<double>::max();
+  const physics::Collision_V collisions = objContInfo.objLink->GetCollisions();
+  for (physics::Collision_V::const_iterator cIt = collisions.begin(); cIt != collisions.end(); ++cIt)
+  {
+    const ignition::math::Pose3d pose = (*cIt)->WorldPose();
+    const physics::ShapePtr shape = (*cIt)->GetShape();
+    double center = axis.Dot(pose.Pos()), half = 0.0;
+    if (physics::BoxShapePtr box = boost::dynamic_pointer_cast<physics::BoxShape>(shape))
+    {
+      const ignition::math::Vector3d size = box->Size();
+      half = 0.5 * (size.X() * std::fabs(axis.Dot(pose.Rot().XAxis())) +
+                    size.Y() * std::fabs(axis.Dot(pose.Rot().YAxis())) +
+                    size.Z() * std::fabs(axis.Dot(pose.Rot().ZAxis())));
+    }
+    else if (physics::CylinderShapePtr cyl = boost::dynamic_pointer_cast<physics::CylinderShape>(shape))
+    {
+      const double along = std::fabs(axis.Dot(pose.Rot().ZAxis()));
+      half = 0.5 * cyl->GetLength() * along + cyl->GetRadius() * std::sqrt(std::max(0.0, 1.0 - along * along));
+    }
+    else if (physics::SphereShapePtr sphere = boost::dynamic_pointer_cast<physics::SphereShape>(shape))
+    {
+      half = sphere->GetRadius();
+    }
+    else
+    {
+      const ignition::math::AxisAlignedBox box = (*cIt)->BoundingBox();
+      const ignition::math::Vector3d size = box.Max() - box.Min();
+      center = axis.Dot((box.Min() + box.Max()) * 0.5);
+      half = 0.5 * (size.X() * std::fabs(axis.X()) + size.Y() * std::fabs(axis.Y()) +
+                    size.Z() * std::fabs(axis.Z()));
+    }
+    lo = std::min(lo, center - half);
+    hi = std::max(hi, center + half);
+  }
+  width = hi - lo;
+  return width > 1e-6;
+#else
+  return false;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -980,6 +1114,16 @@ void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
       for (int k = 0; k < contact.count; ++k) avgPos += contact.positions[k];
       avgPos /= contact.count;
 
+#if GAZEBO_MAJOR_VERSION >= 8
+      // contact normals turned to point out of the object (from its link origin towards the contact)
+      GzVector3 outwardNormal;
+      const GzVector3 objCenter = objCollision->GetLink()->WorldPose().Pos();
+      for (int k = 0; k < contact.count; ++k)
+        outwardNormal += (contact.normals[k].Dot(contact.positions[k] - objCenter) < 0.0) ?
+                         -contact.normals[k] : contact.normals[k];
+      outwardNormal /= contact.count;
+#endif
+
       // now, get average pose relative to the colliding link
       GzPose3 linkWorldPose = gazebo::GetWorldPose(linkCollision->GetLink());
 
@@ -1031,6 +1175,9 @@ void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
         p.force += avgForce;
         p.pos += contactPosInLocal;
         p.objPos += objPosInLocal;
+#if GAZEBO_MAJOR_VERSION >= 8
+        p.normal += outwardNormal;
+#endif
         p.sum++;
       }
       //gzmsg<<"Average force of contact= "<<avgForce.x<<", "<<avgForce.y<<", "<<avgForce.z<<" out of "<<force.size()<<" vectors."<<std::endl;

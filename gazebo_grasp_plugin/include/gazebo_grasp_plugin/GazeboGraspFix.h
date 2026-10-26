@@ -37,6 +37,7 @@ namespace gazebo
  *           <attach_delay>1.0</attach_delay>
  *           <detach_delay>0.1</detach_delay>
  *           <disable_collisions_on_attach>false</disable_collisions_on_attach>
+ *           <no_glue_ratio>0.8</no_glue_ratio>
  *           <contact_topic>__default_topic__</contact_topic>
  *       </plugin>
  *   </gazebo>
@@ -79,6 +80,12 @@ namespace gazebo
  *    - ``<disable_collisions_on_attach>`` can be used for the following:
  *            When an object is attached, collisions with it may be disabled, in case the
  *            robot still keeps wobbling.
+ *    - ``<no_glue_ratio>`` refuses the attachment when the fingers close to a gap below this fraction of the
+ *            object's width along the closing axis (gap: distance between the mean left and right finger contact
+ *            points; width: the extent of the object link's collision shapes along that axis). Such an edge or
+ *            rim pinch would likely fail on a real gripper, so it is left to contact physics. Default 0.8: a full
+ *            grasp reads slightly below the width because the fingers penetrate the object by a few mm. 0 always
+ *            attaches (the old behaviour).
  *    - ``<contact_topic>`` is the gazebo topic of contacts. Should normally be left at -\_\_default_topic\_\_-.
  *
  * Current limitations:
@@ -168,6 +175,12 @@ class GazeboGraspFix : public ModelPlugin
     bool ObjectAttachedToGripper(const std::string &gripperName,
                                  std::string &attachedToGripper) const;
 
+    /**
+     * Finger gap [m] between the mean left and right finger contact points of \e objContInfo and the
+     * object's width [m] along that closing axis. Returns false when it cannot tell (no contact on a side).
+     */
+    bool GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width) const;
+
 
     // physics::ModelPtr model;
     // physics::PhysicsEnginePtr physics;
@@ -214,6 +227,12 @@ class GazeboGraspFix : public ModelPlugin
     // when an object is attached, collisions with it may be disabled, in case the
     // robot still keeps wobbling.
     bool disableCollisionsOnAttach;
+
+    // Refuse the attachment when the finger gap is below noGlueRatio times the object's width along the closing
+    // axis (an edge or rim pinch); 0 disables the check. glueRefused holds the objects whose refusal was logged
+    // in the current grip, so it is logged once per grip.
+    double noGlueRatio;
+    std::set<std::string> glueRefused;
 
     // all collisions per gazebo collision link (each entry
     // belongs to a physics::CollisionPtr element). The key
