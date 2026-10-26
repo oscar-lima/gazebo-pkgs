@@ -65,7 +65,13 @@ bool GazeboGraspGripper::Init(physics::ModelPtr &_model,
   }
   physics::PhysicsEnginePtr physics =
     gazebo::GetPhysics(this->model->GetWorld());
+#if GAZEBO_MAJOR_VERSION >= 8
+  // A real fixed joint: the revolute joint with both limits at 0 used before is held about its axis only by the
+  // soft ODE joint stop, so a grasped object off the hinge axis swung tens of degrees in the hand.
+  this->fixedJoint = physics->CreateJoint("fixed");
+#else
   this->fixedJoint = physics->CreateJoint("revolute");
+#endif
 
   this->palmLink = this->model->GetLink(palmLinkName);
   if (!this->palmLink)
@@ -205,10 +211,7 @@ bool GazeboGraspGripper::HandleAttach(const std::string &objName)
                          gazebo::GetWorldPose(this->palmLink);
   this->fixedJoint->Load(this->palmLink, obj->GetLink(), diff);
   this->fixedJoint->Init();
-#if GAZEBO_MAJOR_VERSION >= 8
-  this->fixedJoint->SetUpperLimit(0, 0);
-  this->fixedJoint->SetLowerLimit(0, 0);
-#else
+#if GAZEBO_MAJOR_VERSION < 8
   this->fixedJoint->SetHighStop(0, 0);
   this->fixedJoint->SetLowStop(0, 0);
 #endif
