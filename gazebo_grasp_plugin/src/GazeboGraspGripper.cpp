@@ -158,6 +158,16 @@ double GazeboGraspGripper::gripEffort() const
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+ignition::math::Vector3d GazeboGraspGripper::palmPosition() const
+{
+#if GAZEBO_MAJOR_VERSION >= 8
+  if (this->palmLink)
+    return this->palmLink->WorldPose().Pos();
+#endif
+  return ignition::math::Vector3d();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 double GazeboGraspGripper::fingerPosition() const
 {
 #if GAZEBO_MAJOR_VERSION >= 8

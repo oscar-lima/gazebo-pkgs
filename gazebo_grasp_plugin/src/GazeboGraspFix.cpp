@@ -1,4 +1,5 @@
 #include <boost/bind.hpp>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -259,6 +260,13 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
   gzmsg << "GazeboGraspFix: Using no_glue_ratio " << this->noGlueRatio <<
         " (no attachment when the finger gap is below this fraction of the object's width)." << std::endl;
 
+  this->logGraspGeometry = false;
+  sdf::ElementPtr logGeometryElem = GetOptionalElement(_sdf, "log_grasp_geometry");
+  if (logGeometryElem)
+    this->logGraspGeometry = logGeometryElem->Get<bool>();
+  if (this->logGraspGeometry)
+    gzmsg << "GazeboGraspFix: Logging the grasp geometry once per grip (no effect on the grasp)." << std::endl;
+
   if (_sdf->HasElement("release_tolerance"))
   {
     gzwarn << "GazeboGraspFix: <release_tolerance> is obsolete and ignored; " <<
@@ -424,6 +432,14 @@ void GazeboGraspFix::Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// one contact point of a finger pad with an object, as reported by Gazebo, for the grasp geometry log
+struct ContactSample
+{
+  GzVector3 pos, normal;
+  bool objIsFirst;  // the object is collision1 of the contact (the normal then points from the object to the pad
+                    // when Gazebo's convention is collision1 to collision2)
+};
+
 class GazeboGraspFix::ObjectContactInfo
 {
   public:
@@ -461,6 +477,15 @@ class GazeboGraspFix::ObjectContactInfo
 
     // the object's link, whose collision shapes give its width
     physics::LinkPtr objLink;
+
+    // the finger pad collisions in contact with their contact points (log_grasp_geometry only)
+    struct PadSamples
+    {
+      physics::CollisionPtr pad;
+      bool left;
+      std::vector<ContactSample> samples;
+    };
+    std::vector<PadSamples> pads;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -562,6 +587,7 @@ class GazeboGraspFix::CollidingPoint
       pos(o.pos),
       objPos(o.objPos),
       normal(o.normal),
+      samples(o.samples),
       sum(o.sum) {}
 
     // Name of the gripper/arm involved in contact point
@@ -585,6 +611,9 @@ class GazeboGraspFix::CollidingPoint
 
     // sum of the contact normals in the world frame, each turned to point out of the object
     GzVector3 normal;
+
+    // the single contact points, only collected while log_grasp_geometry is on
+    std::vector<ContactSample> samples;
 
     // sum of force and pose (they are actually summed
     // up from several contact points).
@@ -682,6 +711,14 @@ void GazeboGraspFix::OnUpdate()
         objContInfo.rightFingerContact = true;
       if (collP.collObj && collP.collObj->GetLink())
         objContInfo.objLink = collP.collObj->GetLink();
+      if (this->logGraspGeometry && (left || right) && collP.collLink && !collP.samples.empty())
+      {
+        ObjectContactInfo::PadSamples ps;
+        ps.pad = collP.collLink;
+        ps.left = left;
+        ps.samples = collP.samples;
+        objContInfo.pads.push_back(ps);
+      }
 #if GAZEBO_MAJOR_VERSION >= 8
       // collP.pos sums contact positions in the finger link's frame: back to the world with its current pose
       if ((left || right) && collP.sum > 0 && collP.collLink && collP.collLink->GetLink())
@@ -811,6 +848,8 @@ void GazeboGraspFix::OnUpdate()
     // leave it to contact physics instead of gluing it.
     double gap = 0.0, width = 0.0;
     const bool gapKnown = GraspGapAndWidth(objContInfo, gap, width);
+    if (this->logGraspGeometry && this->geometryLogged.insert(objName).second)
+      this->LogGraspGeometry(objName, objContInfo, gapKnown, gap, width, graspingGripper.palmPosition());
     if (this->noGlueRatio > 0.0 && gapKnown && gap < this->noGlueRatio * width)
     {
       if (this->glueRefused.insert(objName).second)
@@ -839,6 +878,7 @@ void GazeboGraspFix::OnUpdate()
       this->gripCandidates.erase(objName);
       this->gripStartTimes.erase(objName);
       this->glueRefused.erase(objName);
+      this->geometryLogged.erase(objName);
       this->attachFingerPositions[objName] = graspingGripper.fingerPosition();
     }
   }  // for all objects
@@ -882,6 +922,7 @@ void GazeboGraspFix::OnUpdate()
     this->gripStartTimes.erase(objName);
     this->gripCandidates.erase(objName);
     this->glueRefused.erase(objName);
+    this->geometryLogged.erase(objName);
 
     // gzmsg<<"NOT-GRIPPING "<<objName<<", grip count "<<gripCntIt->second<<" (threshold "<<this->gripCountThreshold<<")"<<std::endl;
 
@@ -960,7 +1001,8 @@ void GazeboGraspFix::OnUpdate()
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool GazeboGraspFix::GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width) const
+bool GazeboGraspFix::GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width,
+                                      GzVector3 *axisOut, const GzVector3 *axisIn) const
 {
 #if GAZEBO_MAJOR_VERSION >= 8
   if (objContInfo.leftContactCnt == 0 || objContInfo.rightContactCnt == 0 || !objContInfo.objLink)
@@ -971,11 +1013,15 @@ bool GazeboGraspFix::GraspGapAndWidth(const ObjectContactInfo &objContInfo, doub
   // points tilts with where the contacts sit on the pads, and on a long object a few degrees of tilt add
   // several mm of width.
   GzVector3 axis = objContInfo.leftNormalSum - objContInfo.rightNormalSum;
+  if (axisIn)
+    axis = *axisIn;
   if (axis.Length() < 1e-6)
     axis = closing;
   if (axis.Length() < 1e-6)
     return false;
   axis.Normalize();
+  if (axisOut)
+    *axisOut = axis;
   gap = std::fabs(closing.Dot(axis));
   if (gap < 1e-6)
     return false;
@@ -1024,6 +1070,167 @@ bool GazeboGraspFix::GraspGapAndWidth(const ObjectContactInfo &objContInfo, doub
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+void GazeboGraspFix::LogGraspGeometry(const std::string &objName, const ObjectContactInfo &objContInfo,
+                                      bool gapKnown, double gap, double width, const GzVector3 &palm) const
+{
+#if GAZEBO_MAJOR_VERSION >= 8
+  const double thetaMax = (this->noGlueRatio > 0.0 && this->noGlueRatio < 1.0) ? std::acos(this->noGlueRatio)
+                                                                                : M_PI / 2.0;
+  const bool oldGlue = !(this->noGlueRatio > 0.0 && gapKnown && gap < this->noGlueRatio * width);
+
+  // the centre of the pads per side, to turn each pad's thin axis towards the other side
+  GzVector3 leftCentre, rightCentre;
+  int leftN = 0, rightN = 0;
+  for (size_t i = 0; i < objContInfo.pads.size(); ++i)
+  {
+    const ObjectContactInfo::PadSamples &ps = objContInfo.pads[i];
+    if (!boost::dynamic_pointer_cast<physics::BoxShape>(ps.pad->GetShape()))
+      continue;
+    if (ps.left) { leftCentre += ps.pad->WorldPose().Pos(); ++leftN; }
+    else { rightCentre += ps.pad->WorldPose().Pos(); ++rightN; }
+  }
+  std::ostringstream out;
+  out << "GazeboGraspFix: grasp geometry of " << objName << ": ";
+  if (gapKnown)
+    out << "gap " << gap * 1000.0 << " mm, width " << width * 1000.0 << " mm along the closing axis from the contact"
+        << " normals, ";
+  out << "old rule (no_glue_ratio " << this->noGlueRatio << ") says " << (oldGlue ? "glue" : "refuse")
+      << ", theta_max " << thetaMax * 180.0 / M_PI << " deg.";
+  if (leftN == 0 || rightN == 0)
+  {
+    out << " No box-shaped finger pad in contact on " << (leftN == 0 ? "the left" : "the right")
+        << " side: new path would say no (missing data).";
+    gzmsg << out.str() << std::endl;
+    return;
+  }
+  leftCentre /= leftN;
+  rightCentre /= rightN;
+
+  // gap and width again, both along the pad closing axis (the left pad's thin axis turned towards the right pad)
+  GzVector3 cAxis;
+  bool haveC = false;
+
+  bool allSquare = true, allEngaged = true, noCavity = true, anySample = false;
+  physics::RayShapePtr ray = boost::dynamic_pointer_cast<physics::RayShape>(
+      this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
+
+  for (size_t i = 0; i < objContInfo.pads.size(); ++i)
+  {
+    const ObjectContactInfo::PadSamples &ps = objContInfo.pads[i];
+    physics::BoxShapePtr box = boost::dynamic_pointer_cast<physics::BoxShape>(ps.pad->GetShape());
+    if (!box || ps.samples.empty())
+      continue;
+    anySample = true;
+    const ignition::math::Pose3d pose = ps.pad->WorldPose();
+    const ignition::math::Vector3d size = box->Size();
+    const double dims[3] = {size.X(), size.Y(), size.Z()};
+    int thin = 0, len = 0;
+    for (int d = 1; d < 3; ++d)
+    {
+      if (dims[d] < dims[thin]) thin = d;
+      if (dims[d] > dims[len]) len = d;
+    }
+    const GzVector3 axes[3] = {pose.Rot().XAxis(), pose.Rot().YAxis(), pose.Rot().ZAxis()};
+    // closing axis of this pad: its thin axis, pointing to the other side's pads
+    GzVector3 a = axes[thin];
+    const GzVector3 toOther = ps.left ? (rightCentre - leftCentre) : (leftCentre - rightCentre);
+    if (a.Dot(toOther) < 0.0)
+      a = -a;
+    if (ps.left && !haveC)
+    {
+      cAxis = a;
+      haveC = true;
+    }
+    // the fingertip edge is the end of the long axis that lies farther from the palm
+    const GzVector3 lenAxis = axes[len];
+    const double tipSign = (lenAxis.Dot(pose.Pos() - palm) >= 0.0) ? 1.0 : -1.0;
+    const double halfLen = 0.5 * dims[len], halfThin = 0.5 * dims[thin];
+
+    double angMax = 0.0, angMin = 1e9, angSum = 0.0, angSq = 0.0, depthMin = 1e9, depthMax = -1e9;
+    int square = 0, agree = 0;
+    GzVector3 unitSum;
+    for (size_t k = 0; k < ps.samples.size(); ++k)
+    {
+      const ContactSample &cs = ps.samples[k];
+      GzVector3 n = cs.normal;
+      if (n.Length() < 1e-9)
+        continue;
+      n.Normalize();
+      // the object's outward normal, measured in the stress world: with the object as collision1 the reported normal points into the object (angles came out near 180 deg), so it is turned; it points to
+      // this pad, so against the pad's axis towards the other side
+      const GzVector3 outward = cs.objIsFirst ? -n : n;
+      double cosA = std::max(-1.0, std::min(1.0, outward.Dot(-a)));
+      const double ang = std::acos(cosA);
+      angMax = std::max(angMax, ang);
+      angSum += ang;
+      angSq += ang * ang;
+      angMin = std::min(angMin, ang);
+      if (ang <= thetaMax) ++square;
+      if (cosA > 0.0) ++agree;
+      unitSum += outward;
+      const double depth = std::max(0.0, std::min(2.0 * halfLen, halfLen - tipSign * (cs.pos - pose.Pos()).Dot(lenAxis)));
+      depthMin = std::min(depthMin, depth);
+      depthMax = std::max(depthMax, depth);
+    }
+    const int n = static_cast<int>(ps.samples.size());
+    if (square < n) allSquare = false;
+    if (depthMax < 2.0 * halfLen / 3.0) allEngaged = false;
+
+    // cavity probe: from the pad's outer face, away from the object: a hit on the same object means the finger
+    // stands inside a concavity. The near ray starts at the face (the finger's own body may shadow it), the far
+    // ray beyond the finger.
+    std::string cav[2];
+    const double startOff[2] = {halfThin + 0.002, 0.08};
+    for (int r = 0; r < 2; ++r)
+    {
+      const GzVector3 start = pose.Pos() - a * startOff[r];
+      ray->SetPoints(start, start - a * 0.4);
+      double dist = 0.0;
+      std::string entity;
+      ray->GetIntersection(dist, entity);
+      std::ostringstream cs;
+      if (entity.empty())
+        cs << "no hit";
+      else
+      {
+        const bool onObject = objContInfo.objLink && entity.compare(0, objContInfo.objLink->GetScopedName().size(),
+                                                                    objContInfo.objLink->GetScopedName()) == 0;
+        cs << (onObject ? "OBJECT " : "other ") << entity << " at " << dist * 1000.0 << " mm";
+        if (onObject) noCavity = false;
+      }
+      cav[r] = cs.str();
+    }
+    out << "\n  " << (ps.left ? "left " : "right ") << ps.pad->GetName() << ": " << n << " contact points, normal angle to the"
+        << " closing axis min " << angMin * 180.0 / M_PI << " max " << angMax * 180.0 / M_PI << " mean "
+        << angSum / n * 180.0 / M_PI << " spread (std) "
+        << std::sqrt(std::max(0.0, angSq / n - (angSum / n) * (angSum / n))) * 180.0 / M_PI << " deg, "
+        << square << " of " << n << " within theta_max, |mean unit normal| " << unitSum.Length() / n
+        << ", outward sign agrees " << agree << " of " << n << ", depth from the fingertip edge "
+        << depthMin * 1000.0 << " to " << depthMax * 1000.0 << " mm of " << 2000.0 * halfLen << " mm pad, cavity probe near ["
+        << cav[0] << "] far [" << cav[1] << "]";
+  }
+  if (!anySample)
+  {
+    gzmsg << out.str() << " No pad contact points: new path would say no (missing data)." << std::endl;
+    return;
+  }
+  if (haveC)
+  {
+    double gapC = 0.0, widthC = 0.0;
+    if (GraspGapAndWidth(objContInfo, gapC, widthC, NULL, &cAxis))
+      out << "\n  along the pad closing axis: gap " << gapC * 1000.0 << " mm, width " << widthC * 1000.0
+          << " mm, ratio " << gapC / widthC;
+  }
+  const bool newPath = allSquare && allEngaged && noCavity;
+  out << "\n  new path: square contacts " << (allSquare ? "yes" : "no") << ", engaged " << (allEngaged ? "yes" : "no")
+      << " (deepest contact at least a third of the pad from the tip), no cavity " << (noCavity ? "yes" : "no")
+      << " -> " << (newPath ? "glue" : "refuse") << "; old rule or new path: " << ((oldGlue || newPath) ? "glue" : "refuse")
+      << " (logging only, the grasp is decided by no_glue_ratio as before).";
+  gzmsg << out.str() << std::endl;
+#endif
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
 {
   //gzmsg<<"CONTACT! "<<std::endl;//<<_contact<<std::endl;
@@ -1059,6 +1266,7 @@ void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
       std::string collidingObjName, collidingLink, gripperOfCollidingLink;
       physics::CollisionPtr linkCollision;
       physics::CollisionPtr objCollision;
+      bool objIsFirst = false;
 
       physics::Contact contact;
       contact = _msg->contact(i);
@@ -1080,6 +1288,7 @@ void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
       if (gripperCollIt != this->collisions.end())
       {
         // collision 1 is the object
+        objIsFirst = true;
         collidingObjName = name1;
         collidingLink = name2;
         linkCollision = collision2;
@@ -1178,6 +1387,17 @@ void GazeboGraspFix::OnContact(const ConstContactsPtr &_msg)
 #if GAZEBO_MAJOR_VERSION >= 8
         p.normal += outwardNormal;
 #endif
+        if (this->logGraspGeometry)
+        {
+          for (int k = 0; k < contact.count; ++k)
+          {
+            ContactSample sample;
+            sample.pos = contact.positions[k];
+            sample.normal = contact.normals[k];
+            sample.objIsFirst = objIsFirst;
+            p.samples.push_back(sample);
+          }
+        }
         p.sum++;
       }
       //gzmsg<<"Average force of contact= "<<avgForce.x<<", "<<avgForce.y<<", "<<avgForce.z<<" out of "<<force.size()<<" vectors."<<std::endl;

@@ -63,6 +63,11 @@ class GazeboGraspGripper
     double fingerPosition() const;
 
     /**
+     * World position of the palm link's origin (for the grasp geometry log); the origin when there is no palm.
+     */
+    ignition::math::Vector3d palmPosition() const;
+
+    /**
      * \param gripContacts contact forces on the object sorted by the link name colliding.
      */
     bool HandleAttach(const std::string &objName);

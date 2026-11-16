@@ -179,7 +179,16 @@ class GazeboGraspFix : public ModelPlugin
      * Finger gap [m] between the mean left and right finger contact points of \e objContInfo and the
      * object's width [m] along that closing axis. Returns false when it cannot tell (no contact on a side).
      */
-    bool GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width) const;
+    bool GraspGapAndWidth(const ObjectContactInfo &objContInfo, double &gap, double &width,
+                          ignition::math::Vector3d *axisOut = NULL, const ignition::math::Vector3d *axisIn = NULL) const;
+
+    /**
+     * Logging only, no effect on the grasp: writes how the finger pads touch the object (per contact the angle of
+     * the object's outward normal to the pad closing axis, how far from the fingertip edge the contacts lie, whether
+     * the pad outer face looks into a cavity of the object) and what the old and a candidate rule would decide.
+     */
+    void LogGraspGeometry(const std::string &objName, const ObjectContactInfo &objContInfo, bool gapKnown,
+                          double gap, double width, const ignition::math::Vector3d &palm) const;
 
 
     // physics::ModelPtr model;
@@ -233,6 +242,10 @@ class GazeboGraspFix : public ModelPlugin
     // in the current grip, so it is logged once per grip.
     double noGlueRatio;
     std::set<std::string> glueRefused;
+
+    // log_grasp_geometry (default false): write the grasp geometry log once per grip, see LogGraspGeometry
+    bool logGraspGeometry;
+    std::set<std::string> geometryLogged;
 
     // all collisions per gazebo collision link (each entry
     // belongs to a physics::CollisionPtr element). The key
